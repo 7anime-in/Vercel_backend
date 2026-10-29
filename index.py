@@ -1,7 +1,6 @@
 import os
-import asyncio
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse
 from pyrogram import Client
 
 app = FastAPI()
@@ -9,11 +8,11 @@ app = FastAPI()
 API_ID = int(os.getenv("API_ID") or 0)
 API_HASH = os.getenv("API_HASH") or ""
 SESSION_STRING = os.getenv("SESSION_STRING") or ""
+BOT_TOKEN = os.getenv("BOT_TOKEN") or ""
 
-# Helper to get active Pyrogram client (Initialized per request for Serverless)
 async def get_userbot():
     if not API_ID or not API_HASH or not SESSION_STRING:
-        raise RuntimeError("Telegram credentials missing in Vercel Environment Variables!")
+        raise RuntimeError("Telegram credentials missing!")
     
     client = Client(
         "vercel_7anime_bot",
@@ -27,13 +26,13 @@ async def get_userbot():
 
 @app.get("/")
 async def root():
-    return {"status": "online", "platform": "Vercel Serverless Telegram Proxy"}
+    return {"status": "online", "platform": "Vercel 302 Redirect Proxy (Zero Bandwidth)"}
 
 @app.get("/download/{chat_id}/{message_id}")
 async def proxy_download(request: Request, chat_id: str, message_id: int):
     client = None
     try:
-        # Handle chat ID format (Username vs Numeric ID)
+        # Handle chat ID format
         if chat_id.lstrip("-").isdigit():
             target_chat = int(chat_id)
         else:
@@ -50,50 +49,24 @@ async def proxy_download(request: Request, chat_id: str, message_id: int):
         if not media:
             raise HTTPException(status_code=404, detail="No media found in this message!")
 
-        file_size = media.file_size
-        file_name = getattr(media, "file_name", "anime_video.mp4")
-        mime_type = getattr(media, "mime_type", "video/mp4")
+        # Get file details from Telegram
+        file_info = await client.get_file(media.file_id)
+        file_path = file_info.file_path
 
-        # Handle HTTP Range Headers (Crucial for 20MB chunking & video seeking)
-        range_header = request.headers.get("range")
-        start = 0
-        end = file_size - 1
+        if not BOT_TOKEN:
+            raise HTTPException(status_code=500, detail="BOT_TOKEN environment variable is missing for direct CDN redirect!")
 
-        if range_header:
-            try:
-                byte_range = range_header.replace("bytes=", "").split("-")
-                start = int(byte_range[0])
-                if len(byte_range) > 1 and byte_range[1]:
-                    end = int(byte_range[1])
-            except ValueError:
-                pass
+        # Telegram's official high-speed direct CDN link format
+        telegram_cdn_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
 
-        # Stream generator for chunks
-        async def chunk_generator():
-            try:
-                async for chunk in client.stream_media(msg, offset=start, limit=end - start + 1):
-                    yield chunk
-            except GeneratorExit:
-                pass
-            finally:
-                if client and client.is_connected:
-                    await client.stop()
+        if client and client.is_connected:
+            await client.stop()
 
-        headers = {
-            "Content-Range": f"bytes {start}-{end}/{file_size}",
-            "Accept-Ranges": "bytes",
-            "Content-Length": str(end - start + 1),
-            "Content-Type": mime_type,
-            "Content-Disposition": f'inline; filename="{file_name}"',
-        }
-
-        return StreamingResponse(
-            chunk_generator(),
-            status_code=206 if range_header else 200,
-            headers=headers
-        )
+        # 302 Redirect: Vercel se ek bhi byte nahi guzrega, user seedha Telegram se download karega!
+        return RedirectResponse(url=telegram_cdn_url, status_code=302)
 
     except Exception as e:
         if client and client.is_connected:
             await client.stop()
         raise HTTPException(status_code=500, detail=str(e))
+        
